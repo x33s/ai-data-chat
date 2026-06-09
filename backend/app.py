@@ -1,11 +1,24 @@
 """FastAPI 服务 - AI 数据分析助手"""
-from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI, HTTPException, UploadFile, File, Form
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 from typing import Optional, List, Dict, Any
 
 from agent import DataAgent
-from data_loader import get_data_info, load_data
+from data_loader import (
+    get_data_info, 
+    load_data, 
+    parse_uploaded_file, 
+    update_data_from_upload,
+    # 新增导入
+    get_all_datasets,
+    get_current_data_info,
+    save_uploaded_files,
+    switch_dataset,
+    delete_dataset,
+    get_data_preview
+)
+from nl_to_sql import NLToSQL
 
 # 创建 FastAPI 应用
 app = FastAPI(title="AI 数据分析助手", version="1.0")
@@ -48,7 +61,7 @@ class ChartResponse(BaseModel):
 
 
 # ============================================
-# API 端点
+# 基础 API 端点
 # ============================================
 
 @app.get("/")
@@ -69,6 +82,128 @@ async def info():
         raise HTTPException(status_code=500, detail=str(e))
 
 
+# ============================================
+# 数据集管理接口（核心 - 支持多文件上传）
+# ============================================
+
+@app.get("/datasets")
+async def list_datasets():
+    """获取所有数据集"""
+    try:
+        datasets = get_all_datasets()
+        return {"datasets": datasets}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.get("/datasets/current")
+async def get_current_dataset():
+    """获取当前激活的数据集"""
+    try:
+        result = get_current_data_info()
+        return result if result else {"message": "没有激活的数据集"}
+    except Exception as e:
+        return {"error": str(e)}
+
+
+@app.post("/datasets/upload")
+async def upload_datasets(files: List[UploadFile] = File(...)):
+    """批量上传数据集（支持多文件）"""
+    try:
+        results = save_uploaded_files(files)
+        
+        success_count = sum(1 for r in results if r["success"])
+        
+        return {
+            "success": success_count > 0,
+            "total": len(results),
+            "success_count": success_count,
+            "fail_count": len(results) - success_count,
+            "results": results
+        }
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.post("/upload")
+async def upload_single_file(file: UploadFile = File(...)):
+    """单文件上传（兼容旧接口）"""
+    try:
+        file_content = await file.read()
+        result = update_data_from_upload(file_content, file.filename)
+        
+        if not result.get("success"):
+            raise HTTPException(status_code=400, detail=result.get("error", "上传失败"))
+        
+        return result
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.post("/datasets/switch")
+async def switch_dataset_api(filename: str = Form(...)):
+    """切换数据集"""
+    try:
+        result = switch_dataset(filename)
+        if not result.get("success"):
+            raise HTTPException(status_code=400, detail=result.get("error", "切换失败"))
+        return result
+    except Exception as e:
+        raise HTTPException(status_code=400, detail=str(e))
+
+
+@app.delete("/datasets/{filename}")
+async def delete_dataset_api(filename: str):
+    """删除数据集"""
+    try:
+        result = delete_dataset(filename)
+        if not result.get("success"):
+            raise HTTPException(status_code=400, detail=result.get("error", "删除失败"))
+        return result
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.get("/datasets/preview")
+async def preview_dataset(limit: int = 10):
+    """获取数据预览"""
+    try:
+        return get_data_preview(limit)
+    except Exception as e:
+        raise HTTPException(status_code=400, detail=str(e))
+
+
+@app.post("/upload/parse")
+async def parse_file_only(file: UploadFile = File(...)):
+    """仅解析文件，不更新全局数据缓存（用于预览）"""
+    try:
+        file_content = await file.read()
+        
+        if len(file_content) == 0:
+            raise HTTPException(status_code=400, detail="文件为空")
+        
+        parse_result = parse_uploaded_file(file_content, file.filename)
+        
+        if not parse_result.get("success"):
+            raise HTTPException(status_code=400, detail=parse_result.get("error", "文件解析失败"))
+        
+        return {
+            "success": True,
+            "message": "文件解析成功",
+            "data": parse_result["data"]
+        }
+        
+    except HTTPException:
+        raise
+    except Exception as e:
+        print(f"文件解析错误: {e}")
+        raise HTTPException(status_code=500, detail=f"解析文件时发生错误: {str(e)}")
+
+
+# ============================================
+# 对话和查询接口
+# ============================================
+
 @app.post("/chat", response_model=ChatResponse)
 async def chat(request: ChatRequest):
     """对话接口"""
@@ -76,10 +211,8 @@ async def chat(request: ChatRequest):
         raise HTTPException(status_code=400, detail="消息不能为空")
     
     try:
-        # 调用 Agent
         answer = agent.chat(request.message)
         
-        # 获取数据概览（如果用户问的是概览相关）
         keywords = ["数据", "概览", "总览", "统计", "整体"]
         need_info = any(kw in request.message for kw in keywords)
         data_info = get_data_info() if need_info else None
@@ -98,14 +231,11 @@ async def generate_chart(request: ChatRequest):
         raise HTTPException(status_code=400, detail="消息不能为空")
     
     try:
-        # 调用 Agent 获取结构化图表数据
         result = agent.generate_chart_data(request.message)
         
-        # 检查是否有错误
         if "error" in result:
             raise HTTPException(status_code=400, detail=result["error"])
         
-        # 确保返回的数据结构完整
         if not result.get("xAxis") or len(result["xAxis"]) == 0:
             raise HTTPException(status_code=400, detail="没有可用的图表数据")
         

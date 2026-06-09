@@ -21,31 +21,42 @@ class DataAgent:
     
     def __init__(self):
         self.conversation_history: List[Dict] = []
-        self.system_prompt = """你是一个专业的数据分析助手。你可以查询销售数据、生成图表并回答用户问题。
+        self.system_prompt = """你是一个专业的数据分析助手。你可以查询销售数据、生成图表、执行SQL查询并回答用户问题。
+
+当前数据表信息：
+- 表名: sales
+- 列名: 日期(date), 产品(product), 品类(category), 销售额(sales_amount), 销售员(salesperson), 数量(quantity)
 
 工作流程：
 1. 理解用户的问题
 2. 如果需要查询数据，调用 query_sales_data 工具
 3. 如果需要了解数据概况，调用 get_data_info 工具
 4. 如果用户要求画图、绘制图表、可视化数据，调用 generate_chart 工具
-5. 基于查询结果回答用户的问题
+5. 如果用户明确要求使用SQL查询、想看SQL语句或进行复杂数据分析，调用 execute_sql 工具
+6. 基于查询结果回答用户的问题
 
 工具使用说明：
-- generate_chart: 用于生成图表数据。当用户说"画个图"、"画柱状图"、"绘制图表"、"可视化"等时使用此工具。
-  - chart_type: 图表类型，支持 bar(柱状图), line(折线图), pie(饼图)
-  - data_type: 数据类型，支持 product(产品销售额), salesperson(销售员业绩), category(品类销售), monthly(月度趋势)
+- query_sales_data: 查询销售数据，可以按日期范围、产品、品类、销售员筛选
+- get_data_info: 获取数据概览，了解整体情况
+- generate_chart: 用于生成图表数据。支持 bar(柱状图), line(折线图), pie(饼图)
+- execute_sql: 执行SQL查询。当用户说"用SQL查询"、"写个SQL"、"执行SQL"等时使用。只支持SELECT查询。
+  - sql: SQL语句，表名固定为 sales，例如：SELECT * FROM sales WHERE 品类='电子产品'
 
 回答要求：
 - 用简洁清晰的语言总结数据
 - 如果用户问趋势、排行等，主动指出关键发现
 - 如果用户要求画图，调用 generate_chart 工具后，用自然语言描述图表内容
+- 如果用户要求SQL查询，调用 execute_sql 工具后，展示执行的SQL和查询结果
 
 示例：
 用户问："哪个产品卖得最好？"
-你应该：先调用 query_sales_data 获取数据，然后回答："根据数据，[产品名]的销售额最高，达到[金额]元。"
+你应该：先调用 query_sales_data 获取数据，然后回答。
 
 用户说："画个柱状图"
-你应该：调用 generate_chart(chart_type="bar", data_type="product")，然后描述图表内容。"""
+你应该：调用 generate_chart(chart_type="bar", data_type="product")
+
+用户说："写个SQL查询电子产品的销售数据"
+你应该：调用 execute_sql(sql="SELECT * FROM sales WHERE 品类='电子产品'")"""
     
     def chat(self, user_message: str) -> str:
         """处理用户消息"""
@@ -150,61 +161,56 @@ class DataAgent:
     
     def generate_chart_data(self, user_message: str) -> Dict:
         """生成结构化的图表数据"""
-        from data_loader import query_sales_data
+        from data_loader import query_sales_data, get_current_data_info
         
-        # 查询数据
+        # 获取当前数据信息
+        data_info = get_current_data_info()
+        print(f"当前数据: {data_info}")
+        
+        # 查询销售数据
         result = query_sales_data()
+        print(f"查询结果: {result}")
         
-        # 根据用户消息决定返回什么数据
-        if "产品" in user_message or "卖得最好" in user_message or "排行" in user_message:
-            if result.get("product_sales"):
-                return {
-                    "chart_type": "bar",
-                    "title": "各产品销售额对比",
-                    "xAxis": list(result["product_sales"].keys()),
-                    "series": [{
-                        "name": "销售额",
-                        "data": list(result["product_sales"].values())
-                    }]
-                }
+        # 判断图表类型
+        chart_type = "bar"
+        if "折线" in user_message or "趋势" in user_message:
+            chart_type = "line"
+        elif "饼图" in user_message:
+            chart_type = "pie"
         
+        # 判断数据类型
         if "销售员" in user_message or "业绩" in user_message:
             if result.get("salesperson_sales"):
-                return {
-                    "chart_type": "bar",
-                    "title": "销售员业绩对比",
-                    "xAxis": list(result["salesperson_sales"].keys()),
-                    "series": [{
-                        "name": "销售额",
-                        "data": list(result["salesperson_sales"].values())
-                    }]
-                }
-        
-        if "月份" in user_message or "趋势" in user_message:
+                x_data = list(result["salesperson_sales"].keys())
+                y_data = list(result["salesperson_sales"].values())
+                title = "销售员业绩对比"
+            else:
+                return {"error": "没有销售员数据"}
+        elif "月份" in user_message or "月度" in user_message or "趋势" in user_message:
             if result.get("monthly_sales"):
                 # 按月份排序
                 months = sorted(result["monthly_sales"].keys())
-                values = [result["monthly_sales"][m] for m in months]
-                return {
-                    "chart_type": "line",
-                    "title": "月度销售额趋势",
-                    "xAxis": months,
-                    "series": [{
-                        "name": "销售额",
-                        "data": values
-                    }]
-                }
+                x_data = months
+                y_data = [result["monthly_sales"][m] for m in months]
+                title = "月度销售额趋势"
+                chart_type = "line"  # 强制折线图
+            else:
+                return {"error": "没有月度数据"}
+        else:
+            # 默认产品数据
+            if result.get("product_sales"):
+                x_data = list(result["product_sales"].keys())
+                y_data = list(result["product_sales"].values())
+                title = "各产品销售额对比"
+            else:
+                return {"error": "没有产品数据"}
         
-        # 默认返回产品数据
-        if result.get("product_sales"):
-            return {
-                "chart_type": "bar",
-                "title": "各产品销售额对比",
-                "xAxis": list(result["product_sales"].keys()),
-                "series": [{
-                    "name": "销售额",
-                    "data": list(result["product_sales"].values())
-                }]
-            }
-        
-        return {"error": "无法生成图表，请确保数据已加载"}
+        return {
+            "chart_type": chart_type,
+            "title": title,
+            "xAxis": x_data,
+            "series": [{
+                "name": "销售额",
+                "data": y_data
+            }]
+        }

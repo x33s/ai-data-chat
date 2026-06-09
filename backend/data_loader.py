@@ -1,180 +1,449 @@
-"""数据加载模块 - 支持 CSV 文件"""
+"""数据加载模块 - 简化版"""
 import os
 import pandas as pd
-from typing import Dict, List, Any, Optional
+from typing import List, Dict, Any
+from io import BytesIO
+import traceback
 
-# 全局数据缓存
-_data_cache = None
-_data_path = os.path.join(os.path.dirname(__file__), "data", "sales_data.csv")
+# 数据目录
+DATA_DIR = os.path.join(os.path.dirname(__file__), "data", "uploads")
+os.makedirs(DATA_DIR, exist_ok=True)
 
-
-def load_data(file_path: str = None) -> pd.DataFrame:
-    """加载 CSV 数据"""
-    global _data_cache
-    
-    if _data_cache is not None:
-        return _data_cache
-    
-    path = file_path or _data_path
-    
-    if not os.path.exists(path):
-        raise FileNotFoundError(f"数据文件不存在: {path}")
-    
-    df = pd.read_csv(path)
-    # 转换日期列
-    df['日期'] = pd.to_datetime(df['日期'])
-    _data_cache = df
-    
-    print(f"[INFO] 已加载数据: {len(df)} 行, {df.shape[1]} 列")
-    print(f"   列名: {list(df.columns)}")
-    
-    return df
+# 全局缓存（使用 global 声明）
+_data_cache = {}
+_data_info_cache = {}  # 新增：缓存数据集信息
+_current_dataset = None
 
 
-def get_data_info() -> Dict[str, Any]:
-    """获取数据概览信息"""
-    df = load_data()
+def get_all_datasets() -> List[Dict]:
+    """获取所有已上传的数据集信息"""
+    global _current_dataset, _data_cache, _data_info_cache
     
-    return {
+    datasets = []
+    if not os.path.exists(DATA_DIR):
+        return datasets
+    
+    for filename in os.listdir(DATA_DIR):
+        if filename.endswith(('.csv', '.xlsx', '.xls')):
+            file_path = os.path.join(DATA_DIR, filename)
+            try:
+                stat = os.stat(file_path)
+                
+                # 尝试从缓存获取行数列数
+                rows = 0
+                columns = 0
+                column_names = []
+                
+                # 优先从缓存获取
+                if filename in _data_cache:
+                    df = _data_cache[filename]
+                    rows = len(df)
+                    columns = len(df.columns)
+                    column_names = list(df.columns)[:5]
+                elif filename in _data_info_cache:
+                    rows = _data_info_cache[filename].get("rows", 0)
+                    columns = _data_info_cache[filename].get("columns", 0)
+                    column_names = _data_info_cache[filename].get("column_names", [])
+                else:
+                    # 尝试加载文件获取信息
+                    try:
+                        if filename.endswith('.csv'):
+                            df = pd.read_csv(file_path)
+                        else:
+                            df = pd.read_excel(file_path)
+                        rows = len(df)
+                        columns = len(df.columns)
+                        column_names = list(df.columns)[:5]
+                        # 缓存起来
+                        _data_cache[filename] = df
+                        _data_info_cache[filename] = {
+                            "rows": rows,
+                            "columns": columns,
+                            "column_names": column_names
+                        }
+                    except:
+                        pass
+                
+                datasets.append({
+                    "name": filename,
+                    "size": stat.st_size,
+                    "size_mb": round(stat.st_size / (1024 * 1024), 2),
+                    "modified": stat.st_mtime,
+                    "is_active": filename == _current_dataset,
+                    "rows": rows,
+                    "columns": columns,
+                    "column_names": column_names
+                })
+            except Exception as e:
+                print(f"获取文件信息失败 {filename}: {e}")
+                datasets.append({
+                    "name": filename,
+                    "size": 0,
+                    "is_active": filename == _current_dataset,
+                    "rows": 0,
+                    "columns": 0,
+                    "column_names": []
+                })
+    
+    return datasets
+
+def save_uploaded_files(files: List) -> List[Dict]:
+    """批量保存上传的文件"""
+    global _data_cache, _current_dataset, _data_info_cache
+    
+    results = []
+    
+    for file in files:
+        try:
+            print(f"处理文件: {file.filename}")
+            
+            # 读取文件内容
+            content = file.file.read()
+            print(f"  大小: {len(content)} bytes")
+            
+            # 保存文件
+            safe_name = file.filename.replace(" ", "_")
+            file_path = os.path.join(DATA_DIR, safe_name)
+            with open(file_path, "wb") as f:
+                f.write(content)
+            
+            # 解析数据
+            if safe_name.endswith('.csv'):
+                df = pd.read_csv(BytesIO(content))
+            else:
+                df = pd.read_excel(BytesIO(content))
+            
+            rows = len(df)
+            cols = len(df.columns)
+            print(f"  行数: {rows}, 列数: {cols}")
+            print(f"  列名: {list(df.columns)}")
+            
+            # 缓存 DataFrame 和信息
+            _data_cache[safe_name] = df
+            _data_info_cache[safe_name] = {
+                "rows": rows,
+                "columns": cols,
+                "column_names": list(df.columns)[:10]
+            }
+            
+            if _current_dataset is None:
+                _current_dataset = safe_name
+                print(f"  激活数据集: {_current_dataset}")
+            
+            # 生成预览数据
+            preview_data = []
+            for _, row in df.head(3).iterrows():
+                row_dict = {}
+                for col, val in row.items():
+                    if hasattr(val, 'strftime'):
+                        row_dict[col] = val.strftime('%Y-%m-%d')
+                    elif pd.isna(val):
+                        row_dict[col] = None
+                    else:
+                        row_dict[col] = val
+                preview_data.append(row_dict)
+            
+            results.append({
+                "success": True,
+                "filename": safe_name,
+                "rows": rows,
+                "columns": cols,
+                "column_names": list(df.columns)[:10],
+                "preview": preview_data
+            })
+            
+            print(f"  上传成功: {safe_name}")
+            
+        except Exception as e:
+            print(f"  错误: {str(e)}")
+            import traceback
+            traceback.print_exc()
+            results.append({
+                "success": False,
+                "filename": file.filename,
+                "error": str(e)
+            })
+    
+    return results
+
+def get_current_data_info() -> Dict:
+    """获取当前数据信息"""
+    global _current_dataset, _data_cache
+    
+    if _current_dataset is None:
+        # 尝试加载第一个可用的数据集
+        datasets = get_all_datasets()
+        if datasets:
+            _current_dataset = datasets[0]["name"]
+            print(f"自动激活数据集: {_current_dataset}")
+        else:
+            return {"error": "没有激活的数据集", "message": "请先上传文件"}
+    
+    if _current_dataset not in _data_cache:
+        return {"error": f"数据集不存在: {_current_dataset}", "message": "请重新上传文件"}
+    
+    df = _data_cache[_current_dataset]
+    
+    # 尝试识别关键列
+    date_col = None
+    sales_col = None
+    product_col = None
+    salesperson_col = None
+    category_col = None
+    
+    for col in df.columns:
+        col_lower = col.lower()
+        if '日期' in col_lower or 'date' in col_lower:
+            date_col = col
+        elif '销售额' in col_lower or 'sales' in col_lower or '金额' in col_lower:
+            sales_col = col
+        elif '产品' in col_lower or 'product' in col_lower:
+            product_col = col
+        elif '销售员' in col_lower or 'salesperson' in col_lower or '姓名' in col_lower:
+            salesperson_col = col
+        elif '品类' in col_lower or 'category' in col_lower:
+            category_col = col
+    
+    result = {
+        "filename": _current_dataset,
         "rows": len(df),
-        "columns": list(df.columns),
-        "date_range": {
-            "start": df['日期'].min().strftime('%Y-%m-%d'),
-            "end": df['日期'].max().strftime('%Y-%m-%d')
-        },
-        "products": df['产品'].unique().tolist(),
-        "categories": df['品类'].unique().tolist(),
-        "salespersons": df['销售员'].unique().tolist(),
-        "total_sales": float(df['销售额'].sum()),
-        "avg_sales": float(df['销售额'].mean())
+        "columns": len(df.columns),
+        "column_names": list(df.columns),
+        "total_sales": float(df[sales_col].sum()) if sales_col else 0,
+        "unique_products": int(df[product_col].nunique()) if product_col else 0,
+        "unique_salespersons": int(df[salesperson_col].nunique()) if salesperson_col else 0,
+        "unique_categories": int(df[category_col].nunique()) if category_col else 0,
+        "date_range": None
     }
+    
+    if date_col:
+        try:
+            df[date_col] = pd.to_datetime(df[date_col], errors='coerce')
+            result["date_range"] = {
+                "start": df[date_col].min().strftime('%Y-%m-%d') if pd.notna(df[date_col].min()) else None,
+                "end": df[date_col].max().strftime('%Y-%m-%d') if pd.notna(df[date_col].max()) else None
+            }
+        except:
+            pass
+    
+    return result
 
 
-def query_sales_data(
-    start_date: Optional[str] = None,
-    end_date: Optional[str] = None,
-    product: Optional[str] = None,
-    category: Optional[str] = None,
-    salesperson: Optional[str] = None
-) -> Dict[str, Any]:
-    """
-    查询销售数据
+def get_data_preview(limit: int = 10) -> Dict:
+    """获取数据预览"""
+    global _current_dataset, _data_cache
     
-    Args:
-        start_date: 开始日期 (YYYY-MM-DD)
-        end_date: 结束日期 (YYYY-MM-DD)
-        product: 产品名称
-        category: 品类
-        salesperson: 销售员
+    if _current_dataset is None:
+        datasets = get_all_datasets()
+        if datasets:
+            _current_dataset = datasets[0]["name"]
+        else:
+            return {"error": "没有激活的数据集", "preview": []}
     
-    Returns:
-        查询结果统计
-    """
-    df = load_data()
-    filtered = df.copy()
+    if _current_dataset not in _data_cache:
+        return {"error": f"数据集不存在: {_current_dataset}", "preview": []}
     
-    # 日期筛选
-    if start_date:
-        filtered = filtered[filtered['日期'] >= pd.to_datetime(start_date)]
-    if end_date:
-        filtered = filtered[filtered['日期'] <= pd.to_datetime(end_date)]
+    df = _data_cache[_current_dataset]
     
-    # 其他筛选
-    if product:
-        filtered = filtered[filtered['产品'] == product]
-    if category:
-        filtered = filtered[filtered['品类'] == category]
-    if salesperson:
-        filtered = filtered[filtered['销售员'] == salesperson]
-    
-    if len(filtered) == 0:
-        return {"message": "没有找到符合条件的数据", "data": []}
-    
-    # 按产品汇总销售额
-    product_sales = filtered.groupby('产品')['销售额'].sum().to_dict()
-    product_sales = {k: float(v) for k, v in product_sales.items()}
-    
-    # 按品类汇总
-    category_sales = filtered.groupby('品类')['销售额'].sum().to_dict()
-    category_sales = {k: float(v) for k, v in category_sales.items()}
-    
-    # 按销售员汇总
-    salesperson_sales = filtered.groupby('销售员')['销售额'].sum().to_dict()
-    salesperson_sales = {k: float(v) for k, v in salesperson_sales.items()}
-    
-    # 按月汇总
-    filtered['月份'] = filtered['日期'].dt.strftime('%Y-%m')
-    monthly_sales = filtered.groupby('月份')['销售额'].sum().to_dict()
-    monthly_sales = {k: float(v) for k, v in monthly_sales.items()}
+    # 转换预览数据
+    preview_data = []
+    for _, row in df.head(limit).iterrows():
+        row_dict = {}
+        for col, val in row.items():
+            if hasattr(val, 'strftime'):
+                row_dict[col] = val.strftime('%Y-%m-%d')
+            elif pd.isna(val):
+                row_dict[col] = None
+            else:
+                row_dict[col] = val
+        preview_data.append(row_dict)
     
     return {
-        "total_records": len(filtered),
-        "total_sales": float(filtered['销售额'].sum()),
-        "avg_sales": float(filtered['销售额'].mean()),
-        "product_sales": product_sales,
-        "category_sales": category_sales,
-        "salesperson_sales": salesperson_sales,
-        "monthly_sales": monthly_sales,
-        "top_product": max(product_sales, key=product_sales.get) if product_sales else None,
-        "top_salesperson": max(salesperson_sales, key=salesperson_sales.get) if salesperson_sales else None
+        "filename": _current_dataset,
+        "preview": preview_data,
+        "total_rows": len(df),
+        "total_columns": len(df.columns),
+        "column_names": list(df.columns)
     }
 
 
-def get_chart_data(chart_type: str, data: Dict) -> Dict:
-    """
-    生成图表配置
+def switch_dataset(filename: str) -> Dict:
+    """切换数据集"""
+    global _current_dataset, _data_cache
     
-    Args:
-        chart_type: 图表类型 (bar, line, pie)
-        data: 查询返回的数据
+    if filename not in _data_cache:
+        return {"success": False, "error": f"数据集不存在: {filename}"}
     
-    Returns:
-        ECharts 配置
-    """
-    # 优先使用产品销售额数据
-    if data.get("product_sales"):
-        series_data = data["product_sales"]
-        title = "各产品销售额"
-    elif data.get("monthly_sales"):
-        series_data = data["monthly_sales"]
-        title = "月度销售额趋势"
-    elif data.get("salesperson_sales"):
-        series_data = data["salesperson_sales"]
-        title = "销售员业绩"
-    else:
-        return {"error": "没有可展示的数据"}
+    _current_dataset = filename
+    print(f"切换到数据集: {_current_dataset}")
     
-    x_data = list(series_data.keys())
-    y_data = list(series_data.values())
+    return {"success": True, "filename": filename}
+
+
+def delete_dataset(filename: str) -> Dict:
+    """删除数据集"""
+    global _current_dataset, _data_cache
     
-    if chart_type == "bar":
-        option = {
-            "title": {"text": title},
-            "tooltip": {"trigger": "axis"},
-            "xAxis": {"type": "category", "data": x_data, "name": "类别"},
-            "yAxis": {"type": "value", "name": "销售额(元)"},
-            "series": [{"type": "bar", "data": y_data, "name": "销售额"}]
+    file_path = os.path.join(DATA_DIR, filename)
+    if os.path.exists(file_path):
+        os.remove(file_path)
+    
+    if filename in _data_cache:
+        del _data_cache[filename]
+    
+    if _current_dataset == filename:
+        datasets = get_all_datasets()
+        if datasets:
+            _current_dataset = datasets[0]["name"]
+            print(f"自动切换到: {_current_dataset}")
+        else:
+            _current_dataset = None
+    
+    return {"success": True}
+
+
+# ========== 兼容原有接口 ==========
+
+def load_data():
+    """加载数据"""
+    global _current_dataset, _data_cache
+    
+    if _current_dataset and _current_dataset in _data_cache:
+        return _data_cache[_current_dataset]
+    
+    # 尝试加载第一个可用的数据集
+    datasets = get_all_datasets()
+    if datasets:
+        _current_dataset = datasets[0]["name"]
+        return _data_cache[_current_dataset]
+    
+    raise FileNotFoundError("没有找到数据")
+
+
+def get_data_info():
+    """获取数据概览"""
+    try:
+        return get_current_data_info()
+    except Exception as e:
+        print(f"get_data_info 错误: {e}")
+        return {
+            "rows": 0,
+            "columns": [],
+            "total_sales": 0,
+            "date_range": {"start": "", "end": ""},
+            "unique_products": 0,
+            "unique_salespersons": 0,
+            "unique_categories": 0
         }
-    elif chart_type == "line":
-        option = {
-            "title": {"text": title},
-            "tooltip": {"trigger": "axis"},
-            "xAxis": {"type": "category", "data": x_data, "name": "月份"},
-            "yAxis": {"type": "value", "name": "销售额(元)"},
-            "series": [{"type": "line", "data": y_data, "name": "销售额", "smooth": True}]
-        }
-    elif chart_type == "pie":
-        option = {
-            "title": {"text": title},
-            "tooltip": {"trigger": "item"},
-            "series": [{
-                "type": "pie",
-                "radius": "50%",
-                "data": [{"name": k, "value": v} for k, v in series_data.items()],
-                "label": {"show": True}
-            }]
-        }
-    else:
-        option = {"error": f"不支持的图表类型: {chart_type}"}
+
+
+def query_sales_data(**kwargs):
+    """查询销售数据"""
+    try:
+        df = load_data()
+        result = {"total_records": len(df)}
+        
+        # 查找销售额列
+        sales_col = None
+        for col in df.columns:
+            if '销售额' in col or 'sales' in col.lower() or '金额' in col:
+                sales_col = col
+                break
+        
+        if sales_col:
+            result["total_sales"] = float(df[sales_col].sum())
+            
+            # 按产品分组
+            product_col = None
+            for col in df.columns:
+                if '产品' in col or 'product' in col.lower() or '商品' in col:
+                    product_col = col
+                    break
+            
+            if product_col:
+                product_sales = df.groupby(product_col)[sales_col].sum().to_dict()
+                result["product_sales"] = {k: float(v) for k, v in product_sales.items()}
+            
+            # 按销售员分组
+            salesperson_col = None
+            for col in df.columns:
+                if '销售员' in col or 'salesperson' in col.lower() or '姓名' in col:
+                    salesperson_col = col
+                    break
+            
+            if salesperson_col:
+                salesperson_sales = df.groupby(salesperson_col)[sales_col].sum().to_dict()
+                result["salesperson_sales"] = {k: float(v) for k, v in salesperson_sales.items()}
+            
+            # 按月份分组
+            date_col = None
+            for col in df.columns:
+                if '日期' in col or 'date' in col.lower():
+                    date_col = col
+                    break
+            
+            if date_col:
+                try:
+                    df_copy = df.copy()
+                    df_copy['月份'] = pd.to_datetime(df_copy[date_col], errors='coerce').dt.strftime('%Y-%m')
+                    monthly_sales = df_copy.groupby('月份')[sales_col].sum().to_dict()
+                    result["monthly_sales"] = {k: float(v) for k, v in monthly_sales.items() if pd.notna(k)}
+                except Exception as e:
+                    print(f"月份分组失败: {e}")
+        
+        return result
+    except Exception as e:
+        print(f"query_sales_data 错误: {e}")
+        return {"total_records": 0, "product_sales": {}}
+
+
+def update_data_from_upload(content: bytes, filename: str):
+    """更新数据"""
+    global _data_cache, _current_dataset
     
-    return option
+    try:
+        if filename.endswith('.csv'):
+            df = pd.read_csv(BytesIO(content))
+        else:
+            df = pd.read_excel(BytesIO(content))
+        
+        _data_cache[filename] = df
+        _current_dataset = filename
+        
+        return {"success": True, "data": {"rows": len(df), "columns": len(df.columns)}}
+    except Exception as e:
+        return {"success": False, "error": str(e)}
+
+
+def parse_uploaded_file(content: bytes, filename: str):
+    """解析文件"""
+    try:
+        if filename.endswith('.csv'):
+            df = pd.read_csv(BytesIO(content))
+        else:
+            df = pd.read_excel(BytesIO(content))
+        
+        # 转换预览数据
+        preview_data = []
+        for _, row in df.head(5).iterrows():
+            row_dict = {}
+            for col, val in row.items():
+                if hasattr(val, 'strftime'):
+                    row_dict[col] = val.strftime('%Y-%m-%d')
+                elif pd.isna(val):
+                    row_dict[col] = None
+                else:
+                    row_dict[col] = val
+            preview_data.append(row_dict)
+        
+        return {
+            "success": True,
+            "data": {
+                "rows": len(df),
+                "columns": len(df.columns),
+                "column_names": list(df.columns),
+                "preview": preview_data
+            }
+        }
+    except Exception as e:
+        return {"success": False, "error": str(e)}
