@@ -10,7 +10,6 @@ from data_loader import (
     load_data, 
     parse_uploaded_file, 
     update_data_from_upload,
-    # 新增导入
     get_all_datasets,
     get_current_data_info,
     save_uploaded_files,
@@ -18,7 +17,7 @@ from data_loader import (
     delete_dataset,
     get_data_preview
 )
-from nl_to_sql import NLToSQL
+from nl_to_sql import get_nl_to_sql
 
 # 创建 FastAPI 应用
 app = FastAPI(title="AI 数据分析助手", version="1.0")
@@ -58,6 +57,18 @@ class ChartResponse(BaseModel):
     title: str
     xAxis: List[str]
     series: List[Dict]
+
+
+class NLQueryRequest(BaseModel):
+    question: str
+
+
+class NLQueryResponse(BaseModel):
+    success: bool
+    answer: str
+    query_info: Optional[Dict] = None
+    data: Optional[List] = None
+    row_count: Optional[int] = None
 
 
 # ============================================
@@ -268,6 +279,57 @@ async def get_raw_data(limit: int = 20):
         return df.head(limit).to_dict(orient="records")
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
+
+
+# ============================================
+# 自然语言转 SQL 接口（亮点功能）
+# ============================================
+
+@app.post("/nl/query", response_model=NLQueryResponse)
+async def natural_language_query(request: NLQueryRequest):
+    """自然语言查询接口 - 演示 NL 转 SQL"""
+    if not request.question:
+        raise HTTPException(status_code=400, detail="问题不能为空")
+    
+    try:
+        engine = get_nl_to_sql()
+        if engine is None:
+            return NLQueryResponse(
+                success=False,
+                answer="请先上传数据文件"
+            )
+        
+        result = engine.ask(request.question)
+        
+        return NLQueryResponse(
+            success=result["success"],
+            answer=result.get("answer", ""),
+            query_info=result.get("query_info"),
+            data=result.get("data"),
+            row_count=result.get("row_count")
+        )
+        
+    except Exception as e:
+        print(f"NL 查询错误: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.get("/nl/schema")
+async def get_schema():
+    """获取数据表结构"""
+    try:
+        engine = get_nl_to_sql()
+        if engine is None:
+            return {"error": "请先上传数据文件"}
+        
+        return {
+            "columns": engine.columns,
+            "column_types": engine.column_types,
+            "sample_data": engine.sample_data,
+            "row_count": len(engine.df)
+        }
+    except Exception as e:
+        return {"error": str(e)}
 
 
 # ============================================
