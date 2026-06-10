@@ -33,7 +33,7 @@
           <div class="message-bubble streaming-bubble">
             <div class="message-text">
               {{ streamingContent }}
-              <span class="cursor">|</span>
+              <span class="cursor"></span>
             </div>
           </div>
         </div>

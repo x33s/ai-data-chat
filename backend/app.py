@@ -8,17 +8,33 @@ import asyncio
 import json
 
 from agent import DataAgent
-from data_loader import (
-    get_data_info, 
-    load_data, 
-    parse_uploaded_file, 
-    update_data_from_upload,
+# from data_loader import (
+#     get_data_info, 
+#     load_data, 
+#     parse_uploaded_file, 
+#     update_data_from_upload,
+#     get_all_datasets,
+#     get_current_data_info,
+#     save_uploaded_files,
+#     switch_dataset,
+#     delete_dataset,
+#     get_data_preview
+# )
+from data import (
     get_all_datasets,
-    get_current_data_info,
     save_uploaded_files,
-    switch_dataset,
     delete_dataset,
-    get_data_preview
+    get_current_data,
+    get_current_data_info,
+    switch_dataset,
+    get_data_preview,
+    load_data,
+    get_data_info,
+    query_sales_data,
+    update_data_from_upload,
+    parse_uploaded_file,
+    execute_sql_query,
+    get_cache_stats,  # 可选：查看缓存效果
 )
 from nl_to_sql import get_nl_to_sql
 

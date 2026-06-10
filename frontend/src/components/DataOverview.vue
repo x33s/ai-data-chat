@@ -162,6 +162,7 @@ onMounted(() => {
   background: #f9f9f9;
   border-radius: 8px;
   padding: 16px;
+  max-height: 280px;
 }
 
 .overview-header {
