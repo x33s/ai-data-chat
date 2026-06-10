@@ -3,6 +3,9 @@ from fastapi import FastAPI, HTTPException, UploadFile, File, Form
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 from typing import Optional, List, Dict, Any
+from fastapi.responses import StreamingResponse
+import asyncio
+import json
 
 from agent import DataAgent
 from data_loader import (
@@ -234,6 +237,32 @@ async def chat(request: ChatRequest):
         print(f"错误: {e}")
         raise HTTPException(status_code=500, detail=str(e))
 
+@app.post("/chat/stream")
+async def chat_stream(request: ChatRequest):
+    """流式对话接口"""
+    if not request.message:
+        raise HTTPException(status_code=400, detail="消息不能为空")
+    
+    async def generate():
+        try:
+            for chunk in agent.chat_stream(request.message):
+                # 确保每个 chunk 都是字符串
+                if chunk:
+                    yield f"data: {chunk}\n\n"
+                await asyncio.sleep(0.01)
+            yield "data: [DONE]\n\n"
+        except Exception as e:
+            print(f"流式接口错误: {e}")
+            yield f"data: 错误: {str(e)}\n\n"
+    
+    return StreamingResponse(
+        generate(), 
+        media_type="text/event-stream",
+        headers={
+            "Cache-Control": "no-cache",
+            "Connection": "keep-alive",
+        }
+    )
 
 @app.post("/chart")
 async def generate_chart(request: ChatRequest):

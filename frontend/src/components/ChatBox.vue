@@ -10,7 +10,7 @@
           <div class="message-bubble">
             <div class="message-text" v-html="formatMessage(msg.content)"></div>
           </div>
-          <!-- 图表按钮 - 默认样式，无背景色 -->
+          <!-- 图表按钮 -->
           <div v-if="msg.role === 'assistant' && msg.hasChart" class="chart-action">
             <el-button 
               size="small" 
@@ -26,13 +26,14 @@
         </div>
       </div>
       
-      <!-- 加载状态 -->
-      <div v-if="isLoading" class="message assistant">
+      <!-- 流式输出时的临时消息 -->
+      <div v-if="isStreaming" class="message assistant streaming">
         <el-avatar :size="36" class="assistant">🤖</el-avatar>
         <div class="message-content">
-          <div class="message-bubble loading-bubble">
-            <div class="typing-indicator">
-              <span></span><span></span><span></span>
+          <div class="message-bubble streaming-bubble">
+            <div class="message-text">
+              {{ streamingContent }}
+              <span class="cursor">|</span>
             </div>
           </div>
         </div>
@@ -45,18 +46,24 @@
         v-model="inputText"
         type="textarea"
         :rows="2"
-        placeholder="输入问题，如：哪个产品卖得最好？ 或：画个柱状图"
-        :disabled="isLoading"
+        :placeholder="isStreaming ? 'AI 正在思考...' : '输入问题，如：哪个产品卖得最好？ 或：画个柱状图'"
+        :disabled="isStreaming"
         resize="none"
-        @keydown.enter.prevent="sendMessage"
+        @keydown.enter.prevent="sendMessageStream"
       />
       <el-button 
         type="primary"
-        :loading="isLoading"
-        :disabled="!inputText.trim()"
-        @click="sendMessage"
+        :loading="isStreaming"
+        :disabled="!inputText || !inputText.trim()"
+        @click="sendMessageStream"
       >
-        发送
+        {{ isStreaming ? '思考中...' : '发送' }}
+      </el-button>
+      <el-button 
+        :disabled="isStreaming"
+        @click="clearChat"
+      >
+        清空
       </el-button>
     </div>
   </el-card>
@@ -64,13 +71,17 @@
 
 <script setup>
 import { ref, nextTick } from 'vue'
-import { getChat } from '@/api/chat.js'
+import { ElMessage } from 'element-plus'
+
+const API_BASE = 'http://localhost:8001'
 
 const emit = defineEmits(['message-sent', 'chart-needed', 'reopen-chart'])
 
+// 响应式数据
 const messages = ref([])
 const inputText = ref('')
-const isLoading = ref(false)
+const isStreaming = ref(false)
+const streamingContent = ref('')
 const messagesContainer = ref(null)
 
 // 格式化消息
@@ -85,12 +96,6 @@ const shouldGenerateChart = (message) => {
   return chartKeywords.some(kw => message.toLowerCase().includes(kw.toLowerCase()))
 }
 
-// 检查回答中是否包含图表相关内容
-const hasChartInAnswer = (answer) => {
-  const chartIndicators = ['柱状图', '折线图', '饼图', '图表', '销售额对比', '业绩对比', '趋势']
-  return chartIndicators.some(ind => answer.includes(ind))
-}
-
 // 重新打开图表
 const handleReopenChart = (chartMessage) => {
   console.log('点击查看图表，消息:', chartMessage)
@@ -99,10 +104,12 @@ const handleReopenChart = (chartMessage) => {
   }
 }
 
-const sendMessage = async () => {
-  if (!inputText.value.trim() || isLoading.value) return
+// 流式发送消息
+const sendMessageStream = async () => {
+  const message = inputText.value
+  if (!message || !message.trim() || isStreaming.value) return
   
-  const userMessage = inputText.value.trim()
+  const userMessage = message.trim()
   const needChart = shouldGenerateChart(userMessage)
   
   // 添加用户消息
@@ -113,34 +120,88 @@ const sendMessage = async () => {
   })
   
   inputText.value = ''
-  isLoading.value = true
+  isStreaming.value = true
+  streamingContent.value = ''
   
   await nextTick()
   scrollToBottom()
   
   emit('message-sent', userMessage)
   
-  try { 
-    const response = await getChat({
-      message: userMessage
+  try {
+    const response = await fetch(`${API_BASE}/chat/stream`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ message: userMessage })
     })
     
-    const hasChart = needChart || hasChartInAnswer(response.answer)
+    const reader = response.body.getReader()
+    const decoder = new TextDecoder()
+    let buffer = ''
+    let fullAnswer = ''
     
-    messages.value.push({
-      role: 'assistant',
-      content: response.answer,
-      time: new Date().toLocaleTimeString(),
-      hasChart: hasChart,
-      chartMessage: userMessage
-    })
-    
-    if (needChart) {
-      emit('chart-needed', userMessage)
+    while (true) {
+      const { done, value } = await reader.read()
+      if (done) break
+      
+      buffer += decoder.decode(value, { stream: true })
+      const lines = buffer.split('\n')
+      buffer = lines.pop() || ''
+      
+      for (const line of lines) {
+        if (line.startsWith('data: ')) {
+          const data = line.slice(6)
+          
+          if (data === '[DONE]') {
+            // 流式结束
+            messages.value.push({
+              role: 'assistant',
+              content: fullAnswer,
+              time: new Date().toLocaleTimeString(),
+              hasChart: needChart,
+              chartMessage: userMessage
+            })
+            if (needChart) {
+              emit('chart-needed', userMessage)
+            }
+          } else if (data.startsWith('{')) {
+            // JSON 格式
+            try {
+              const parsed = JSON.parse(data)
+              if (parsed.type === 'content') {
+                fullAnswer += parsed.content
+                streamingContent.value = fullAnswer
+                await nextTick()
+                scrollToBottom()
+              } else if (parsed.type === 'end') {
+                messages.value.push({
+                  role: 'assistant',
+                  content: fullAnswer,
+                  time: new Date().toLocaleTimeString(),
+                  hasChart: needChart,
+                  chartMessage: userMessage
+                })
+                if (needChart) {
+                  emit('chart-needed', userMessage)
+                }
+              }
+            } catch (e) {
+              console.error('解析 JSON 失败:', e)
+            }
+          } else if (data && !data.startsWith('错误')) {
+            // 简单格式
+            fullAnswer += data
+            streamingContent.value = fullAnswer
+            await nextTick()
+            scrollToBottom()
+          }
+        }
+      }
     }
     
   } catch (error) {
     console.error('请求失败', error)
+    ElMessage.error('请求失败，请检查后端服务')
     messages.value.push({
       role: 'assistant',
       content: '抱歉，处理请求时出错了。请稍后再试。',
@@ -148,9 +209,23 @@ const sendMessage = async () => {
       hasChart: false
     })
   } finally {
-    isLoading.value = false
+    isStreaming.value = false
+    streamingContent.value = ''
     await nextTick()
     scrollToBottom()
+  }
+}
+
+// 清空对话
+const clearChat = async () => {
+  if (!confirm('确定清空所有对话吗？')) return
+  
+  messages.value = []
+  try {
+    await fetch(`${API_BASE}/clear`, { method: 'POST' })
+    ElMessage.success('对话已清空')
+  } catch (error) {
+    console.error('清空失败', error)
   }
 }
 
@@ -160,12 +235,9 @@ const scrollToBottom = () => {
   }
 }
 
-const clearHistory = () => {
-  messages.value = []
-}
-
+// 暴露方法给父组件
 defineExpose({
-  clearHistory
+  clearChat
 })
 </script>
 
@@ -247,44 +319,26 @@ defineExpose({
   color: white;
 }
 
-/* 加载气泡 */
-.loading-bubble {
+/* 流式气泡 */
+.streaming-bubble {
   background: white;
-  padding: 12px 20px;
+  border: 1px solid #667eea;
 }
 
-/* 打字动画 */
-.typing-indicator {
-  display: flex;
-  gap: 4px;
-  align-items: center;
+/* 光标动画 */
+.cursor {
+  animation: blink 1s step-end infinite;
+  display: inline-block;
+  width: 2px;
+  height: 1em;
+  background-color: #667eea;
+  margin-left: 2px;
+  vertical-align: middle;
 }
 
-.typing-indicator span {
-  width: 8px;
-  height: 8px;
-  background: #adb5bd;
-  border-radius: 50%;
-  animation: typing 1.4s infinite;
-}
-
-.typing-indicator span:nth-child(2) {
-  animation-delay: 0.2s;
-}
-
-.typing-indicator span:nth-child(3) {
-  animation-delay: 0.4s;
-}
-
-@keyframes typing {
-  0%, 60%, 100% {
-    transform: translateY(0);
-    opacity: 0.5;
-  }
-  30% {
-    transform: translateY(-8px);
-    opacity: 1;
-  }
+@keyframes blink {
+  0%, 100% { opacity: 1; }
+  50% { opacity: 0; }
 }
 
 /* 消息文本 */
@@ -300,7 +354,7 @@ defineExpose({
   margin: 4px 0;
 }
 
-/* 图表按钮 - 无背景色，默认样式 */
+/* 图表按钮 */
 .chart-action {
   margin-top: 8px;
   text-align: left;
@@ -344,9 +398,16 @@ defineExpose({
   box-shadow: 0 0 0 2px rgba(102, 126, 234, 0.1);
 }
 
-.input-area .el-button {
+.input-area .el-button--primary {
   border-radius: 24px;
   padding: 10px 24px;
+  background: linear-gradient(135deg, #667eea, #764ba2);
+  border: none;
+}
+
+.input-area .el-button--primary:hover {
+  transform: translateY(-1px);
+  box-shadow: 0 4px 12px rgba(102, 126, 234, 0.3);
 }
 
 /* 动画 */

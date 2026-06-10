@@ -169,3 +169,121 @@ class DataAgent:
         
         from tools import generate_chart_logic
         return generate_chart_logic(chart_type, data_type)
+
+    def chat_stream(self, user_message: str):
+        """流式处理用户消息 - 支持工具调用"""
+        self._check_dataset_change()
+        
+        # 添加用户消息到历史
+        self.conversation_history.append({
+            "role": "user",
+            "content": user_message
+        })
+        
+        # 构建消息
+        messages = [
+            {"role": "system", "content": self.system_prompt}
+        ] + self.conversation_history
+        
+        try:
+            # 第一次调用：判断是否需要工具（不使用流式）
+            response = client.chat.completions.create(
+                model="qwen-plus",
+                messages=messages,
+                tools=TOOLS,
+                tool_choice="auto",
+                temperature=0.1
+            )
+            
+            assistant_message = response.choices[0].message
+            
+            # 如果需要工具调用
+            if assistant_message.tool_calls:
+                # 保存工具调用消息
+                self.conversation_history.append({
+                    "role": "assistant",
+                    "content": assistant_message.content,
+                    "tool_calls": [
+                        {
+                            "id": tc.id,
+                            "type": "function",
+                            "function": {
+                                "name": tc.function.name,
+                                "arguments": tc.function.arguments
+                            }
+                        }
+                        for tc in assistant_message.tool_calls
+                    ]
+                })
+                
+                # 执行工具
+                for tool_call in assistant_message.tool_calls:
+                    tool_name = tool_call.function.name
+                    arguments = json.loads(tool_call.function.arguments)
+                    
+                    print(f"[工具调用] {tool_name}: {arguments}")
+                    
+                    # 执行工具
+                    result = execute_tool(tool_name, arguments)
+                    
+                    # 添加工具结果
+                    self.conversation_history.append({
+                        "role": "tool",
+                        "tool_call_id": tool_call.id,
+                        "content": json.dumps(result, ensure_ascii=False)
+                    })
+                
+                # 第二次调用：生成最终回答（流式输出）
+                final_messages = [
+                    {"role": "system", "content": self.system_prompt}
+                ] + self.conversation_history
+                
+                # 流式输出时不要传 tools 参数
+                stream = client.chat.completions.create(
+                    model="qwen-plus",
+                    messages=final_messages,
+                    temperature=0.1,
+                    stream=True
+                )
+                
+                full_content = ""
+                for chunk in stream:
+                    if chunk.choices[0].delta.content:
+                        content = chunk.choices[0].delta.content
+                        full_content += content
+                        yield content
+                
+                # 保存最终回答
+                self.conversation_history.append({
+                    "role": "assistant",
+                    "content": full_content
+                })
+            
+            else:
+                # 没有工具调用，直接流式输出
+                # 流式输出时不要传 tools 参数
+                stream = client.chat.completions.create(
+                    model="qwen-plus",
+                    messages=messages,
+                    temperature=0.1,
+                    stream=True
+                )
+                
+                full_content = ""
+                for chunk in stream:
+                    if chunk.choices[0].delta.content:
+                        content = chunk.choices[0].delta.content
+                        full_content += content
+                        yield content
+                
+                # 保存到历史
+                self.conversation_history.append({
+                    "role": "assistant",
+                    "content": full_content
+                })
+            
+        except Exception as e:
+            print(f"流式错误: {e}")
+            import traceback
+            traceback.print_exc()
+            yield f"调用失败: {str(e)}"
