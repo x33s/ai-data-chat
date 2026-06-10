@@ -21,70 +21,73 @@ class DataAgent:
     
     def __init__(self):
         self.conversation_history: List[Dict] = []
-        self.system_prompt = """你是一个专业的数据分析助手。你可以查询销售数据、生成图表、执行SQL查询并回答用户问题。
+        self.current_dataset = None  # 记录当前数据集
+        self.max_history = 20
+        self.system_prompt = """你是专业的数据分析助手。你有以下能力：
+1. 查询销售数据（query_sales_data）
+2. 查看数据概况（get_data_info）
+3. 生成图表（generate_chart）- 支持bar/line/pie
+4. 执行SQL查询（execute_sql）
 
-当前数据表信息：
-- 表名: sales
-- 列名: 日期(date), 产品(product), 品类(category), 销售额(sales_amount), 销售员(salesperson), 数量(quantity)
+工作原则：
+- 根据用户需求选择合适的工具
+- 工具调用后，基于返回的data字段回答用户问题
+- 回答要简洁、数据准确
+- 记住对话上下文，支持连续对话
 
-工作流程：
-1. 理解用户的问题
-2. 如果需要查询数据，调用 query_sales_data 工具
-3. 如果需要了解数据概况，调用 get_data_info 工具
-4. 如果用户要求画图、绘制图表、可视化数据，调用 generate_chart 工具
-5. 如果用户明确要求使用SQL查询、想看SQL语句或进行复杂数据分析，调用 execute_sql 工具
-6. 基于查询结果回答用户的问题
-
-工具使用说明：
-- query_sales_data: 查询销售数据，可以按日期范围、产品、品类、销售员筛选
-- get_data_info: 获取数据概览，了解整体情况
-- generate_chart: 用于生成图表数据。支持 bar(柱状图), line(折线图), pie(饼图)
-- execute_sql: 执行SQL查询。当用户说"用SQL查询"、"写个SQL"、"执行SQL"等时使用。只支持SELECT查询。
-  - sql: SQL语句，表名固定为 sales，例如：SELECT * FROM sales WHERE 品类='电子产品'
-
-回答要求：
-- 用简洁清晰的语言总结数据
-- 如果用户问趋势、排行等，主动指出关键发现
-- 如果用户要求画图，调用 generate_chart 工具后，用自然语言描述图表内容
-- 如果用户要求SQL查询，调用 execute_sql 工具后，展示执行的SQL和查询结果
-
-示例：
-用户问："哪个产品卖得最好？"
-你应该：先调用 query_sales_data 获取数据，然后回答。
-
-用户说："画个柱状图"
-你应该：调用 generate_chart(chart_type="bar", data_type="product")
-
-用户说："写个SQL查询电子产品的销售数据"
-你应该：调用 execute_sql(sql="SELECT * FROM sales WHERE 品类='电子产品'")"""
+示例连续对话：
+用户：总销售额多少？
+助手：总销售额是204,500元。
+用户：那哪个产品卖得最好？
+助手：根据刚才的数据，智能手机卖得最好，销售额87,000元。"""
+    
+    def _check_dataset_change(self):
+        """检查数据集是否切换，如果切换则清空对话历史"""
+        from data_loader import _current_dataset
+        if self.current_dataset != _current_dataset:
+            if self.current_dataset is not None:
+                print(f"数据集已切换: {self.current_dataset} -> {_current_dataset}，清空对话历史")
+                self.conversation_history = []
+            self.current_dataset = _current_dataset
+    
+    def _trim_history(self):
+        """限制历史记录长度"""
+        if len(self.conversation_history) > self.max_history:
+            self.conversation_history = self.conversation_history[-self.max_history:]
     
     def chat(self, user_message: str) -> str:
         """处理用户消息"""
-        # 添加用户消息到历史
+        # 检查数据集是否变化
+        self._check_dataset_change()
+        
+        # 添加用户消息
         self.conversation_history.append({
             "role": "user",
             "content": user_message
         })
         
-        # 构建消息列表
+        # 构建消息
         messages = [
             {"role": "system", "content": self.system_prompt}
         ] + self.conversation_history
         
         # 第一次调用 LLM
-        response = client.chat.completions.create(
-            model="qwen-plus",
-            messages=messages,
-            tools=TOOLS,
-            tool_choice="auto",
-            temperature=0.1
-        )
+        try:
+            response = client.chat.completions.create(
+                model="qwen-plus",
+                messages=messages,
+                tools=TOOLS,
+                tool_choice="auto",
+                temperature=0.1
+            )
+        except Exception as e:
+            return f"调用模型失败: {str(e)}"
         
         assistant_message = response.choices[0].message
         
-        # 检查是否需要调用工具
+        # 处理工具调用
         if assistant_message.tool_calls:
-            # 添加助手消息（包含工具调用）
+            # 保存助手消息
             self.conversation_history.append({
                 "role": "assistant",
                 "content": assistant_message.content,
@@ -101,51 +104,61 @@ class DataAgent:
                 ]
             })
             
-            # 执行每个工具调用
+            # 执行所有工具
             for tool_call in assistant_message.tool_calls:
                 tool_name = tool_call.function.name
                 arguments = json.loads(tool_call.function.arguments)
                 
-                print(f"[TOOL] 调用工具: {tool_name}")
-                print(f"   参数: {arguments}")
+                print(f"[工具调用] {tool_name}")
+                print(f"[参数] {json.dumps(arguments, ensure_ascii=False)}")
                 
                 # 执行工具
                 result = execute_tool(tool_name, arguments)
                 
-                # 添加工具结果到历史
+                print(f"[结果] {json.dumps(result, ensure_ascii=False)[:200]}...")
+                
+                # 添加工具结果
                 self.conversation_history.append({
                     "role": "tool",
                     "tool_call_id": tool_call.id,
                     "content": json.dumps(result, ensure_ascii=False)
                 })
             
-            # 第二次调用 LLM，整合工具结果
+            # 第二次调用生成最终回答
             final_messages = [
                 {"role": "system", "content": self.system_prompt}
             ] + self.conversation_history
             
-            final_response = client.chat.completions.create(
-                model="qwen-plus",
-                messages=final_messages,
-                temperature=0.1
-            )
+            try:
+                final_response = client.chat.completions.create(
+                    model="qwen-plus",
+                    messages=final_messages,
+                    temperature=0.1
+                )
+                
+                final_answer = final_response.choices[0].message.content
+                
+                # 保存最终回答
+                self.conversation_history.append({
+                    "role": "assistant",
+                    "content": final_answer
+                })
+                
+                # 限制历史长度
+                self._trim_history()
+                
+                return final_answer
             
-            final_answer = final_response.choices[0].message.content
-            
-            # 添加最终回答到历史
-            self.conversation_history.append({
-                "role": "assistant",
-                "content": final_answer
-            })
-            
-            return final_answer
+            except Exception as e:
+                return f"生成回答失败: {str(e)}"
         
-        # 没有工具调用，直接返回
+        # 没有工具调用
         if assistant_message.content:
             self.conversation_history.append({
                 "role": "assistant",
                 "content": assistant_message.content
             })
+            self._trim_history()
             return assistant_message.content
         
         return "抱歉，我无法回答这个问题。"
@@ -153,6 +166,7 @@ class DataAgent:
     def clear_history(self):
         """清空对话历史"""
         self.conversation_history = []
+        print("对话历史已清空")
     
     def get_info(self) -> Dict:
         """获取 Agent 信息"""
@@ -160,57 +174,28 @@ class DataAgent:
         return get_data_info()
     
     def generate_chart_data(self, user_message: str) -> Dict:
-        """生成结构化的图表数据"""
-        from data_loader import query_sales_data, get_current_data_info
+        """生成结构化的图表数据（供前端直接调用）"""
+        from data_loader import query_sales_data
         
-        # 获取当前数据信息
-        data_info = get_current_data_info()
-        print(f"当前数据: {data_info}")
-        
-        # 查询销售数据
-        result = query_sales_data()
-        print(f"查询结果: {result}")
+        user_message_lower = user_message.lower()
         
         # 判断图表类型
-        chart_type = "bar"
-        if "折线" in user_message or "趋势" in user_message:
+        if "折线" in user_message_lower or "趋势" in user_message_lower:
             chart_type = "line"
-        elif "饼图" in user_message:
+        elif "饼图" in user_message_lower:
             chart_type = "pie"
+        else:
+            chart_type = "bar"
         
         # 判断数据类型
-        if "销售员" in user_message or "业绩" in user_message:
-            if result.get("salesperson_sales"):
-                x_data = list(result["salesperson_sales"].keys())
-                y_data = list(result["salesperson_sales"].values())
-                title = "销售员业绩对比"
-            else:
-                return {"error": "没有销售员数据"}
-        elif "月份" in user_message or "月度" in user_message or "趋势" in user_message:
-            if result.get("monthly_sales"):
-                # 按月份排序
-                months = sorted(result["monthly_sales"].keys())
-                x_data = months
-                y_data = [result["monthly_sales"][m] for m in months]
-                title = "月度销售额趋势"
-                chart_type = "line"  # 强制折线图
-            else:
-                return {"error": "没有月度数据"}
+        if "销售员" in user_message_lower or "业绩" in user_message_lower:
+            data_type = "salesperson"
+        elif "月份" in user_message_lower or "月度" in user_message_lower or "趋势" in user_message_lower:
+            data_type = "monthly"
+            chart_type = "line"
         else:
-            # 默认产品数据
-            if result.get("product_sales"):
-                x_data = list(result["product_sales"].keys())
-                y_data = list(result["product_sales"].values())
-                title = "各产品销售额对比"
-            else:
-                return {"error": "没有产品数据"}
+            data_type = "product"
         
-        return {
-            "chart_type": chart_type,
-            "title": title,
-            "xAxis": x_data,
-            "series": [{
-                "name": "销售额",
-                "data": y_data
-            }]
-        }
+        # 调用图表生成逻辑
+        from tools import generate_chart_logic
+        return generate_chart_logic(chart_type, data_type)

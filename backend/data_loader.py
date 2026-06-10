@@ -1,4 +1,4 @@
-"""数据加载模块 - 简化版"""
+"""数据加载模块 - 支持多文件上传、动态识别列"""
 import os
 import pandas as pd
 from typing import List, Dict, Any
@@ -9,9 +9,9 @@ import traceback
 DATA_DIR = os.path.join(os.path.dirname(__file__), "data", "uploads")
 os.makedirs(DATA_DIR, exist_ok=True)
 
-# 全局缓存（使用 global 声明）
+# 全局缓存
 _data_cache = {}
-_data_info_cache = {}  # 新增：缓存数据集信息
+_data_info_cache = {}
 _current_dataset = None
 
 
@@ -29,12 +29,10 @@ def get_all_datasets() -> List[Dict]:
             try:
                 stat = os.stat(file_path)
                 
-                # 尝试从缓存获取行数列数
                 rows = 0
                 columns = 0
                 column_names = []
                 
-                # 优先从缓存获取
                 if filename in _data_cache:
                     df = _data_cache[filename]
                     rows = len(df)
@@ -45,7 +43,6 @@ def get_all_datasets() -> List[Dict]:
                     columns = _data_info_cache[filename].get("columns", 0)
                     column_names = _data_info_cache[filename].get("column_names", [])
                 else:
-                    # 尝试加载文件获取信息
                     try:
                         if filename.endswith('.csv'):
                             df = pd.read_csv(file_path)
@@ -54,7 +51,6 @@ def get_all_datasets() -> List[Dict]:
                         rows = len(df)
                         columns = len(df.columns)
                         column_names = list(df.columns)[:5]
-                        # 缓存起来
                         _data_cache[filename] = df
                         _data_info_cache[filename] = {
                             "rows": rows,
@@ -87,6 +83,7 @@ def get_all_datasets() -> List[Dict]:
     
     return datasets
 
+
 def save_uploaded_files(files: List) -> List[Dict]:
     """批量保存上传的文件"""
     global _data_cache, _current_dataset, _data_info_cache
@@ -97,17 +94,14 @@ def save_uploaded_files(files: List) -> List[Dict]:
         try:
             print(f"处理文件: {file.filename}")
             
-            # 读取文件内容
             content = file.file.read()
             print(f"  大小: {len(content)} bytes")
             
-            # 保存文件
             safe_name = file.filename.replace(" ", "_")
             file_path = os.path.join(DATA_DIR, safe_name)
             with open(file_path, "wb") as f:
                 f.write(content)
             
-            # 解析数据
             if safe_name.endswith('.csv'):
                 df = pd.read_csv(BytesIO(content))
             else:
@@ -118,7 +112,6 @@ def save_uploaded_files(files: List) -> List[Dict]:
             print(f"  行数: {rows}, 列数: {cols}")
             print(f"  列名: {list(df.columns)}")
             
-            # 缓存 DataFrame 和信息
             _data_cache[safe_name] = df
             _data_info_cache[safe_name] = {
                 "rows": rows,
@@ -130,7 +123,6 @@ def save_uploaded_files(files: List) -> List[Dict]:
                 _current_dataset = safe_name
                 print(f"  激活数据集: {_current_dataset}")
             
-            # 生成预览数据
             preview_data = []
             for _, row in df.head(3).iterrows():
                 row_dict = {}
@@ -156,7 +148,6 @@ def save_uploaded_files(files: List) -> List[Dict]:
             
         except Exception as e:
             print(f"  错误: {str(e)}")
-            import traceback
             traceback.print_exc()
             results.append({
                 "success": False,
@@ -166,12 +157,42 @@ def save_uploaded_files(files: List) -> List[Dict]:
     
     return results
 
+
+def get_current_data():
+    """获取当前激活的数据集 DataFrame"""
+    global _current_dataset, _data_cache
+    
+    if _current_dataset is None:
+        datasets = get_all_datasets()
+        if datasets:
+            _current_dataset = datasets[0]["name"]
+            print(f"自动激活数据集: {_current_dataset}")
+        else:
+            raise FileNotFoundError("没有找到任何数据集，请先上传文件")
+    
+    if _current_dataset not in _data_cache:
+        # 尝试重新加载
+        try:
+            file_path = os.path.join(DATA_DIR, _current_dataset)
+            if os.path.exists(file_path):
+                if _current_dataset.endswith('.csv'):
+                    df = pd.read_csv(file_path)
+                else:
+                    df = pd.read_excel(file_path)
+                _data_cache[_current_dataset] = df
+                return df
+        except Exception as e:
+            pass
+        raise FileNotFoundError(f"数据集不存在: {_current_dataset}")
+    
+    return _data_cache[_current_dataset]
+
+
 def get_current_data_info() -> Dict:
     """获取当前数据信息"""
     global _current_dataset, _data_cache
     
     if _current_dataset is None:
-        # 尝试加载第一个可用的数据集
         datasets = get_all_datasets()
         if datasets:
             _current_dataset = datasets[0]["name"]
@@ -184,7 +205,7 @@ def get_current_data_info() -> Dict:
     
     df = _data_cache[_current_dataset]
     
-    # 尝试识别关键列
+    # 动态识别关键列
     date_col = None
     sales_col = None
     product_col = None
@@ -197,11 +218,11 @@ def get_current_data_info() -> Dict:
             date_col = col
         elif '销售额' in col_lower or 'sales' in col_lower or '金额' in col_lower:
             sales_col = col
-        elif '产品' in col_lower or 'product' in col_lower:
+        elif '产品' in col_lower or 'product' in col_lower or '商品' in col_lower:
             product_col = col
         elif '销售员' in col_lower or 'salesperson' in col_lower or '姓名' in col_lower:
             salesperson_col = col
-        elif '品类' in col_lower or 'category' in col_lower:
+        elif '品类' in col_lower or 'category' in col_lower or '类型' in col_lower:
             category_col = col
     
     result = {
@@ -210,19 +231,22 @@ def get_current_data_info() -> Dict:
         "columns": len(df.columns),
         "column_names": list(df.columns),
         "total_sales": float(df[sales_col].sum()) if sales_col else 0,
-        "unique_products": int(df[product_col].nunique()) if product_col else 0,
-        "unique_salespersons": int(df[salesperson_col].nunique()) if salesperson_col else 0,
-        "unique_categories": int(df[category_col].nunique()) if category_col else 0,
+        "products": df[product_col].dropna().unique().tolist() if product_col else [],
+        "salespersons": df[salesperson_col].dropna().unique().tolist() if salesperson_col else [],
+        "categories": df[category_col].dropna().unique().tolist() if category_col else [],
         "date_range": None
     }
     
     if date_col:
         try:
             df[date_col] = pd.to_datetime(df[date_col], errors='coerce')
-            result["date_range"] = {
-                "start": df[date_col].min().strftime('%Y-%m-%d') if pd.notna(df[date_col].min()) else None,
-                "end": df[date_col].max().strftime('%Y-%m-%d') if pd.notna(df[date_col].max()) else None
-            }
+            min_date = df[date_col].min()
+            max_date = df[date_col].max()
+            if pd.notna(min_date) and pd.notna(max_date):
+                result["date_range"] = {
+                    "start": min_date.strftime('%Y-%m-%d'),
+                    "end": max_date.strftime('%Y-%m-%d')
+                }
         except:
             pass
     
@@ -245,7 +269,6 @@ def get_data_preview(limit: int = 10) -> Dict:
     
     df = _data_cache[_current_dataset]
     
-    # 转换预览数据
     preview_data = []
     for _, row in df.head(limit).iterrows():
         row_dict = {}
@@ -302,26 +325,15 @@ def delete_dataset(filename: str) -> Dict:
     return {"success": True}
 
 
-# ========== 兼容原有接口 ==========
+# ========== 兼容原有接口（始终使用当前数据集）==========
 
 def load_data():
-    """加载数据"""
-    global _current_dataset, _data_cache
-    
-    if _current_dataset and _current_dataset in _data_cache:
-        return _data_cache[_current_dataset]
-    
-    # 尝试加载第一个可用的数据集
-    datasets = get_all_datasets()
-    if datasets:
-        _current_dataset = datasets[0]["name"]
-        return _data_cache[_current_dataset]
-    
-    raise FileNotFoundError("没有找到数据")
+    """加载数据 - 始终使用当前激活的数据集"""
+    return get_current_data()
 
 
 def get_data_info():
-    """获取数据概览"""
+    """获取数据概览 - 始终使用当前数据集"""
     try:
         return get_current_data_info()
     except Exception as e:
@@ -330,20 +342,20 @@ def get_data_info():
             "rows": 0,
             "columns": [],
             "total_sales": 0,
-            "date_range": {"start": "", "end": ""},
-            "unique_products": 0,
-            "unique_salespersons": 0,
-            "unique_categories": 0
+            "products": [],
+            "salespersons": [],
+            "categories": [],
+            "date_range": None
         }
 
 
 def query_sales_data(**kwargs):
-    """查询销售数据"""
+    """查询销售数据 - 始终使用当前数据集"""
     try:
-        df = load_data()
+        df = get_current_data()
         result = {"total_records": len(df)}
         
-        # 查找销售额列
+        # 动态查找销售额列
         sales_col = None
         for col in df.columns:
             if '销售额' in col or 'sales' in col.lower() or '金额' in col:
@@ -353,7 +365,7 @@ def query_sales_data(**kwargs):
         if sales_col:
             result["total_sales"] = float(df[sales_col].sum())
             
-            # 按产品分组
+            # 动态查找产品列
             product_col = None
             for col in df.columns:
                 if '产品' in col or 'product' in col.lower() or '商品' in col:
@@ -364,7 +376,7 @@ def query_sales_data(**kwargs):
                 product_sales = df.groupby(product_col)[sales_col].sum().to_dict()
                 result["product_sales"] = {k: float(v) for k, v in product_sales.items()}
             
-            # 按销售员分组
+            # 动态查找销售员列
             salesperson_col = None
             for col in df.columns:
                 if '销售员' in col or 'salesperson' in col.lower() or '姓名' in col:
@@ -375,7 +387,7 @@ def query_sales_data(**kwargs):
                 salesperson_sales = df.groupby(salesperson_col)[sales_col].sum().to_dict()
                 result["salesperson_sales"] = {k: float(v) for k, v in salesperson_sales.items()}
             
-            # 按月份分组
+            # 动态查找日期列，按月分组
             date_col = None
             for col in df.columns:
                 if '日期' in col or 'date' in col.lower():
@@ -423,7 +435,6 @@ def parse_uploaded_file(content: bytes, filename: str):
         else:
             df = pd.read_excel(BytesIO(content))
         
-        # 转换预览数据
         preview_data = []
         for _, row in df.head(5).iterrows():
             row_dict = {}
@@ -444,6 +455,36 @@ def parse_uploaded_file(content: bytes, filename: str):
                 "column_names": list(df.columns),
                 "preview": preview_data
             }
+        }
+    except Exception as e:
+        return {"success": False, "error": str(e)}
+
+
+def execute_sql_query(sql: str) -> Dict[str, Any]:
+    """执行 SQL 查询"""
+    try:
+        import duckdb
+        df = get_current_data()
+        con = duckdb.connect()
+        con.register('sales', df)
+        result_df = con.execute(sql).fetchdf()
+        con.close()
+        
+        for col in result_df.columns:
+            if result_df[col].dtype == 'datetime64[ns]':
+                result_df[col] = result_df[col].dt.strftime('%Y-%m-%d')
+        
+        return {
+            "success": True,
+            "sql": sql,
+            "columns": result_df.columns.tolist(),
+            "data": result_df.to_dict(orient='records'),
+            "row_count": len(result_df)
+        }
+    except ImportError:
+        return {
+            "success": False,
+            "error": "需要安装 duckdb 才能执行 SQL 查询，请运行: pip install duckdb"
         }
     except Exception as e:
         return {"success": False, "error": str(e)}
